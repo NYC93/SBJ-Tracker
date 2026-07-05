@@ -124,40 +124,41 @@
                 runtime: 'tfjs', 
                 modelType: 'lite'
             });
-            statusText.innerText = "System Active. Line up your 4 white cups.";
+            statusText.innerText = "System Active. Line up your 4 cups.";
             trackFrame();
         }
 
-        // White Contrast Tracker
+        // Color-isolated Cup Tracker (Tuned for high-contrast bright colors against a dark background)
         function detectCupsFromFrame() {
             if (!openCvReady) return [];
 
             let src = cv.imread(canvas);
-            let gray = new cv.Mat();
-            let thresh = new cv.Mat();
+            let hsv = new cv.Mat();
+            let mask = new cv.Mat();
             let contours = new cv.MatVector();
             let hierarchy = new cv.Mat();
 
-            // Convert frame to grayscale
-            cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+            cv.cvtColor(src, hsv, cv.COLOR_RGBA2RGB);
+            cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
 
-            // High threshold (200 out of 255) ensures only bright white objects pop out against the black background
-            cv.threshold(gray, thresh, 200, 255, cv.THRESH_BINARY);
+            // Broad spectrum matching for high-visibility saturated colors 
+            // perfect for bright cups against your black floor
+            let low = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [0, 70, 60, 0]);
+            let high = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [180, 255, 255, 255]);
             
-            cv.findContours(thresh, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+            cv.inRange(hsv, low, high, mask);
+            cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
             let temporaryCups = [];
             for (let i = 0; i < contours.size(); ++i) {
                 let cnt = contours.get(i);
                 let area = cv.contourArea(cnt);
                 
-                // Keep objects within reasonable size boundaries
-                if (area > 150 && area < 25000) {
+                if (area > 100 && area < 25000) {
                     let rect = cv.boundingRect(cnt);
                     let aspectRatio = rect.width / rect.height;
-
-                    // Cups usually have an aspect ratio close to vertical rectangles
-                    if (aspectRatio > 0.4 && aspectRatio < 1.6) {
+                    
+                    if (aspectRatio > 0.3 && aspectRatio < 1.8) {
                         temporaryCups.push({
                             x: rect.x + (rect.width / 2),
                             y: rect.y + (rect.height / 2)
@@ -167,9 +168,8 @@
                 cnt.delete();
             }
 
-            gray.delete(); thresh.delete(); contours.delete(); hierarchy.delete(); src.delete();
+            src.delete(); hsv.delete(); mask.delete(); contours.delete(); hierarchy.delete(); low.delete(); high.delete();
 
-            // Remove nearby overlapping bounding points
             let uniqueCups = [];
             temporaryCups.forEach(cup => {
                 if (!uniqueCups.some(u => Math.hypot(u.x - cup.x, u.y - cup.y) < 35)) {
@@ -177,7 +177,6 @@
                 }
             });
 
-            // Order systematically from starting position to ending target position
             return uniqueCups.sort((a, b) => a.x - b.x).slice(0, 4);
         }
 
@@ -186,7 +185,7 @@
 
             detectedCups = detectCupsFromFrame();
 
-            // Render the "OK!" badge directly above each detected white cup
+            // Draw "OK!" directly over the detected cups
             detectedCups.forEach((cup) => {
                 ctx.beginPath();
                 ctx.arc(cup.x, cup.y - 20, 22, 0, 2 * Math.PI);
@@ -200,7 +199,7 @@
                 ctx.fillText("OK!", cup.x, cup.y - 20);
             });
 
-            statusText.innerText = `Cups Tracked: ${detectedCups.length}/4`;
+            statusText.innerText = `Cups Registered: ${detectedCups.length}/4`;
 
             try {
                 const poses = await poseDetector.estimatePoses(canvas, { maxPoses: 1, flipHorizontal: false });
