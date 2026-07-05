@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Broad Jump Tracker with Cone Detection</title>
+    <title>Broad Jump Tracker</title>
     
     <script async src="https://docs.opencv.org/4.5.4/opencv.js" type="text/javascript" id="opencv-js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
@@ -39,6 +39,7 @@
             width: 100%;
             height: 100%;
             object-fit: cover;
+            /* Removed the scaleX(-1) mirror effect so it's no longer inverted */
         }
 
         #distance-box {
@@ -86,7 +87,6 @@
         let openCvReady = false;
         let detectedCones = [];
 
-        // Wait for OpenCV.js to load fully
         document.getElementById('opencv-js').addEventListener('load', () => {
             cv['onRuntimeInitialized'] = () => {
                 openCvReady = true;
@@ -109,87 +109,85 @@
         async function loadPoseModel() {
             const model = poseDetection.SupportedModels.BlazePose;
             poseDetector = await poseDetection.createDetector(model, { runtime: 'tfjs', modelType: 'heavy' });
-            statusText.innerText = "System Active. Place your 4 cones in view.";
+            statusText.innerText = "System Active. Scan your 4 cones.";
             trackFrame();
         }
 
-        // Logic to scan frame for triangular/conical shapes of any color
+        // Optimized cone tracking logic
         function detectConesFromFrame() {
             if (!openCvReady) return [];
 
-            // Read current canvas frame into OpenCV matrix
             let src = cv.imread(canvas);
             let dst = new cv.Mat();
             let contours = new cv.MatVector();
             let hierarchy = new cv.Mat();
 
-            // Convert to grayscale and apply blur to reduce noise
+            // Gray processing with alternative thresholds to catch any color cone
             cv.cvtColor(src, dst, cv.COLOR_RGBA2GRAY);
-            cv.GaussianBlur(dst, dst, new cv.Size(5, 5), 0);
+            cv.threshold(dst, dst, 80, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
             
-            // Edge detection to find outlines of objects
-            cv.Canny(dst, dst, 50, 150, 3);
             cv.findContours(dst, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
             let temporaryCones = [];
 
             for (let i = 0; i < contours.size(); ++i) {
                 let cnt = contours.get(i);
-                let perimeter = cv.arcLength(cnt, true);
-                let approx = new cv.Mat();
+                let area = cv.contourArea(cnt);
                 
-                // Approximate geometric shape shapes
-                cv.approxPolyDP(cnt, approx, 0.04 * perimeter, true);
-
-                // Cones viewed from side/top profiles typically have 3 to 5 contour vertices
-                if (approx.rows >= 3 && approx.rows <= 5 && cv.contourArea(cnt) > 300) {
+                // Filter based on physical size on camera to ignore tiny background specs
+                if (area > 150 && area < 15000) {
                     let rect = cv.boundingRect(cnt);
-                    
-                    // Filter out shapes that are vastly disproportionate 
                     let aspectRatio = rect.width / rect.height;
-                    if (aspectRatio > 0.4 && aspectRatio < 1.5) {
+                    
+                    // Cones are taller or uniform, filtering horizontal noise lines
+                    if (aspectRatio > 0.3 && aspectRatio < 1.8) {
                         temporaryCones.push({
                             x: rect.x + (rect.width / 2),
-                            y: rect.y + (rect.height / 2)
+                            y: rect.y + (rect.height / 2),
+                            area: area
                         });
                     }
                 }
-                approx.delete();
                 cnt.delete();
             }
 
             src.delete(); dst.delete(); contours.delete(); hierarchy.delete();
 
-            // Group close duplicates and prioritize sorting from left to right
-            return temporaryCones.slice(0, 4).sort((a, b) => a.x - b.x);
+            // Prevent overlapping markers on the same cone by checking proximity
+            let uniqueCones = [];
+            temporaryCones.forEach(cone => {
+                if (!uniqueCones.some(u => Math.hypot(u.x - cone.x, u.y - cone.y) < 35)) {
+                    uniqueCones.push(cone);
+                }
+            });
+
+            // Sort left-to-right based on reality layout and limit to 4
+            return uniqueCones.sort((a, b) => a.x - b.x).slice(0, 4);
         }
 
         async function trackFrame() {
-            // Step 1: Draw the raw camera image to the canvas
+            // Draw un-inverted video stream frame
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-            // Step 2: Run the Cone detection logic
             detectedCones = detectConesFromFrame();
 
-            // Step 3: Overlay the "OK!" badge over each detected cone (max 4)
-            detectedCones.forEach((cone, index) => {
-                // Background badge circular box
+            // Render the "OK!" label precisely above each tracked cone point
+            detectedCones.forEach((cone) => {
                 ctx.beginPath();
-                ctx.arc(cone.x, cone.y - 15, 22, 0, 2 * Math.PI);
+                ctx.arc(cone.x, cone.y - 20, 20, 0, 2 * Math.PI);
                 ctx.fillStyle = "#00ffcc";
                 ctx.fill();
 
-                // Text Configuration
                 ctx.fillStyle = "#121212";
-                ctx.font = "bold 13px -apple-system";
+                ctx.font = "bold 12px sans-serif";
                 ctx.textAlign = "center";
-                ctx.fillText("OK!", cone.x, cone.y - 11);
+                ctx.textBaseline = "middle";
+                ctx.fillText("OK!", cone.x, cone.y - 20);
             });
 
-            // Update status with how many cones it physically detects
-            statusText.innerText = `Cones Detected: ${detectedCones.length}/4`;
+            statusText.innerText = `Cones Logged: ${detectedCones.length}/4`;
 
-            // Step 4: Track Jumper Body Pose
+            // Body landmark tracking
             const poses = await poseDetector.estimatePoses(video);
             if (poses.length > 0 && detectedCones.length >= 2) {
                 const keypoints = poses[0].keypoints;
@@ -197,25 +195,25 @@
                 const rightAnkle = keypoints.find(k => k.name === 'right_ankle');
 
                 if (leftAnkle && rightAnkle && leftAnkle.score > 0.5 && rightAnkle.score > 0.5) {
-                    // Back foot determination (closest foot to the starting baseline)
-                    const backFoot = leftAnkle.x < rightAnkle.x ? leftAnkle : rightAnkle;
+                    // With fixed inversion, the trailing back foot depends on the direction jumped.
+                    // We check which foot is closer to the starting Cone 0 coordinate.
+                    const startCone = detectedCones[0];
+                    const leftDist = Math.abs(leftAnkle.x - startCone.x);
+                    const rightDist = Math.abs(rightAnkle.x - startCone.x);
+                    const backFoot = leftDist < rightDist ? leftAnkle : rightAnkle;
 
-                    // Draw tracking dot on back foot
                     ctx.beginPath();
                     ctx.arc(backFoot.x, backFoot.y, 8, 0, 2 * Math.PI);
                     ctx.fillStyle = "#ff3366";
                     ctx.fill();
 
-                    // Calculate real world scaling based on detected cones 1 and 2
-                    // Distance between cone 0 and cone 1 = 100 cm
+                    // Calculate mapping using the distance between Cone 1 and Cone 0 (1 meter / 100cm)
                     const pixelDistanceBetweenCones = Math.abs(detectedCones[1].x - detectedCones[0].x);
                     const pixelsPerCm = pixelDistanceBetweenCones / 100;
 
-                    // Compute total distance starting from the baseline (Cone 0 position)
                     const horizontalDelta = Math.abs(backFoot.x - detectedCones[0].x);
                     let calculatedDistanceCm = horizontalDelta / pixelsPerCm;
 
-                    // Clamp to max bounds (300cm)
                     let finalDistance = Math.min(calculatedDistanceCm, 300);
                     distanceBox.innerText = `${Math.round(finalDistance)} cm`;
                 }
