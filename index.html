@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Standing Broad Jump Tracker</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection"></script>
+
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #121212;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            color: white;
+            overflow: hidden;
+        }
+
+        #container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            max-width: 640px;
+            max-height: 480px;
+        }
+
+        video, canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1); /* Mirror view for natural tracking */
+        }
+
+        /* The tracking distance display box requested */
+        #distance-box {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            padding: 12px 24px;
+            background: rgba(0, 0, 0, 0.85);
+            color: #00ffcc;
+            font-size: 24px;
+            font-weight: bold;
+            border: 2px solid #00ffcc;
+            border-radius: 8px;
+            z-index: 10;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+            pointer-events: none;
+        }
+
+        #status {
+            position: absolute;
+            bottom: 20px;
+            background: rgba(0,0,0,0.6);
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 14px;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="container">
+        <video id="webcam" autoplay playsinline muted></video>
+        <canvas id="output"></canvas>
+        <div id="distance-box">Ready: 0 cm</div>
+        <div id="status">Loading AI Models...</div>
+    </div>
+
+    <script>
+        const video = document.getElementById('webcam');
+        const canvas = document.getElementById('output');
+        const ctx = canvas.getContext('2d');
+        const distanceBox = document.getElementById('distance-box');
+        const statusText = document.getElementById('status');
+
+        let detector;
+        let coneSpacingPixels = 200; // Default pixel distance between 2 cones (1 meter)
+        const cmPerMeter = 100;
+        let startBaselineX = 150;    // Simulating the starting cone position on screen
+
+        // 1. Initialize Camera
+        async function setupCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: "environment", width: 640, height: 480 },
+                    audio: false
+                });
+                video.srcObject = stream;
+                return new Promise((resolve) => {
+                    video.onloadedmetadata = () => { resolve(video); };
+                });
+            } catch (e) {
+                statusText.innerText = "Camera access denied or unavailable.";
+                console.error(e);
+            }
+        }
+
+        // 2. Load MediaPipe Pose Detector
+        async function loadModel() {
+            const model = poseDetection.SupportedModels.BlazePose;
+            const detectorConfig = {
+                runtime: 'tfjs',
+                modelType: 'heavy' // 'heavy' provides maximum accuracy for tracking feet details
+            };
+            detector = await poseDetection.createDetector(model, detectorConfig);
+            statusText.innerText = "AI Models Active. Align your frame.";
+        }
+
+        // 3. Main Tracking Loop
+        async function trackPose() {
+            if (!detector) return;
+
+            const poses = await detector.estimatePoses(video);
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            if (poses.length > 0) {
+                const keypoints = poses[0].keypoints;
+
+                // Extract left and right ankles
+                const leftAnkle = keypoints.find(k => k.name === 'left_ankle');
+                const rightAnkle = keypoints.find(k => k.name === 'right_ankle');
+
+                if (leftAnkle && rightAnkle && leftAnkle.score > 0.5 && rightAnkle.score > 0.5) {
+                    
+                    // Identify the back foot (lowest X coordinate if moving rightward, or adjust based on your setup)
+                    // Because camera is mirrored, we determine the trailing foot dynamically
+                    const backFoot = leftAnkle.x < rightAnkle.x ? leftAnkle : rightAnkle;
+
+                    // Draw a visual marker marker on the tracked back foot
+                    ctx.beginPath();
+                    ctx.arc(backFoot.x, backFoot.y, 8, 0, 2 * Math.PI);
+                    ctx.fillStyle = "#ff3366";
+                    ctx.fill();
+
+                    // Calculate Distance
+                    // 2 cones = 1 meter (100cm). Therefore: 1 cm = (coneSpacingPixels / 100)
+                    let pixelsPerCm = coneSpacingPixels / cmPerMeter;
+                    let horizontalDelta = Math.abs(backFoot.x - startBaselineX);
+                    let calculatedDistanceCm = horizontalDelta / pixelsPerCm;
+
+                    // Cap the maximum tracked measurement to 300cm as required
+                    let finalDistance = Math.min(calculatedDistanceCm, 300);
+
+                    // Update UI Box
+                    distanceBox.innerText = `${Math.round(finalDistance)} cm`;
+                }
+            }
+
+            requestAnimationFrame(trackPose);
+        }
+
+        // Run Application
+        async function main() {
+            await setupCamera();
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            await loadModel();
+            trackPose();
+        }
+
+        main();
+    </script>
+</body>
+</html>
