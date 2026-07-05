@@ -3,8 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Standing Broad Jump Tracker</title>
+    <title>Broad Jump Tracker with Cone Detection</title>
     
+    <script async src="https://docs.opencv.org/4.5.4/opencv.js" type="text/javascript" id="opencv-js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
@@ -15,7 +16,7 @@
             margin: 0;
             padding: 0;
             background-color: #121212;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
             display: flex;
             flex-direction: column;
             align-items: center;
@@ -38,10 +39,8 @@
             width: 100%;
             height: 100%;
             object-fit: cover;
-            transform: scaleX(-1); /* Mirror view for natural tracking */
         }
 
-        /* The tracking distance display box requested */
         #distance-box {
             position: absolute;
             top: 20px;
@@ -54,14 +53,12 @@
             border: 2px solid #00ffcc;
             border-radius: 8px;
             z-index: 10;
-            box-shadow: 0 4px 10px rgba(0,0,0,0.5);
-            pointer-events: none;
         }
 
         #status {
             position: absolute;
             bottom: 20px;
-            background: rgba(0,0,0,0.6);
+            background: rgba(0,0,0,0.7);
             padding: 8px 16px;
             border-radius: 20px;
             font-size: 14px;
@@ -75,7 +72,7 @@
         <video id="webcam" autoplay playsinline muted></video>
         <canvas id="output"></canvas>
         <div id="distance-box">Ready: 0 cm</div>
-        <div id="status">Loading AI Models...</div>
+        <div id="status">Initializing System...</div>
     </div>
 
     <script>
@@ -85,90 +82,152 @@
         const distanceBox = document.getElementById('distance-box');
         const statusText = document.getElementById('status');
 
-        let detector;
-        let coneSpacingPixels = 200; // Default pixel distance between 2 cones (1 meter)
-        const cmPerMeter = 100;
-        let startBaselineX = 150;    // Simulating the starting cone position on screen
+        let poseDetector;
+        let openCvReady = false;
+        let detectedCones = [];
 
-        // 1. Initialize Camera
-        async function setupCamera() {
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: "environment", width: 640, height: 480 },
-                    audio: false
-                });
-                video.srcObject = stream;
-                return new Promise((resolve) => {
-                    video.onloadedmetadata = () => { resolve(video); };
-                });
-            } catch (e) {
-                statusText.innerText = "Camera access denied or unavailable.";
-                console.error(e);
-            }
-        }
-
-        // 2. Load MediaPipe Pose Detector
-        async function loadModel() {
-            const model = poseDetection.SupportedModels.BlazePose;
-            const detectorConfig = {
-                runtime: 'tfjs',
-                modelType: 'heavy' // 'heavy' provides maximum accuracy for tracking feet details
+        // Wait for OpenCV.js to load fully
+        document.getElementById('opencv-js').addEventListener('load', () => {
+            cv['onRuntimeInitialized'] = () => {
+                openCvReady = true;
+                statusText.innerText = "Computer Vision Ready. Loading Pose Model...";
+                loadPoseModel();
             };
-            detector = await poseDetection.createDetector(model, detectorConfig);
-            statusText.innerText = "AI Models Active. Align your frame.";
+        });
+
+        async function setupCamera() {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { facingMode: "environment", width: 640, height: 480 },
+                audio: false
+            });
+            video.srcObject = stream;
+            return new Promise((resolve) => {
+                video.onloadedmetadata = () => { resolve(video); };
+            });
         }
 
-        // 3. Main Tracking Loop
-        async function trackPose() {
-            if (!detector) return;
+        async function loadPoseModel() {
+            const model = poseDetection.SupportedModels.BlazePose;
+            poseDetector = await poseDetection.createDetector(model, { runtime: 'tfjs', modelType: 'heavy' });
+            statusText.innerText = "System Active. Place your 4 cones in view.";
+            trackFrame();
+        }
 
-            const poses = await detector.estimatePoses(video);
+        // Logic to scan frame for triangular/conical shapes of any color
+        function detectConesFromFrame() {
+            if (!openCvReady) return [];
 
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            // Read current canvas frame into OpenCV matrix
+            let src = cv.imread(canvas);
+            let dst = new cv.Mat();
+            let contours = new cv.MatVector();
+            let hierarchy = new cv.Mat();
 
-            if (poses.length > 0) {
+            // Convert to grayscale and apply blur to reduce noise
+            cv.cvtColor(src, dst, cv.COLOR_RGBA2GRAY);
+            cv.GaussianBlur(dst, dst, new cv.Size(5, 5), 0);
+            
+            // Edge detection to find outlines of objects
+            cv.Canny(dst, dst, 50, 150, 3);
+            cv.findContours(dst, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+            let temporaryCones = [];
+
+            for (let i = 0; i < contours.size(); ++i) {
+                let cnt = contours.get(i);
+                let perimeter = cv.arcLength(cnt, true);
+                let approx = new cv.Mat();
+                
+                // Approximate geometric shape shapes
+                cv.approxPolyDP(cnt, approx, 0.04 * perimeter, true);
+
+                // Cones viewed from side/top profiles typically have 3 to 5 contour vertices
+                if (approx.rows >= 3 && approx.rows <= 5 && cv.contourArea(cnt) > 300) {
+                    let rect = cv.boundingRect(cnt);
+                    
+                    // Filter out shapes that are vastly disproportionate 
+                    let aspectRatio = rect.width / rect.height;
+                    if (aspectRatio > 0.4 && aspectRatio < 1.5) {
+                        temporaryCones.push({
+                            x: rect.x + (rect.width / 2),
+                            y: rect.y + (rect.height / 2)
+                        });
+                    }
+                }
+                approx.delete();
+                cnt.delete();
+            }
+
+            src.delete(); dst.delete(); contours.delete(); hierarchy.delete();
+
+            // Group close duplicates and prioritize sorting from left to right
+            return temporaryCones.slice(0, 4).sort((a, b) => a.x - b.x);
+        }
+
+        async function trackFrame() {
+            // Step 1: Draw the raw camera image to the canvas
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            // Step 2: Run the Cone detection logic
+            detectedCones = detectConesFromFrame();
+
+            // Step 3: Overlay the "OK!" badge over each detected cone (max 4)
+            detectedCones.forEach((cone, index) => {
+                // Background badge circular box
+                ctx.beginPath();
+                ctx.arc(cone.x, cone.y - 15, 22, 0, 2 * Math.PI);
+                ctx.fillStyle = "#00ffcc";
+                ctx.fill();
+
+                // Text Configuration
+                ctx.fillStyle = "#121212";
+                ctx.font = "bold 13px -apple-system";
+                ctx.textAlign = "center";
+                ctx.fillText("OK!", cone.x, cone.y - 11);
+            });
+
+            // Update status with how many cones it physically detects
+            statusText.innerText = `Cones Detected: ${detectedCones.length}/4`;
+
+            // Step 4: Track Jumper Body Pose
+            const poses = await poseDetector.estimatePoses(video);
+            if (poses.length > 0 && detectedCones.length >= 2) {
                 const keypoints = poses[0].keypoints;
-
-                // Extract left and right ankles
                 const leftAnkle = keypoints.find(k => k.name === 'left_ankle');
                 const rightAnkle = keypoints.find(k => k.name === 'right_ankle');
 
                 if (leftAnkle && rightAnkle && leftAnkle.score > 0.5 && rightAnkle.score > 0.5) {
-                    
-                    // Identify the back foot (lowest X coordinate if moving rightward, or adjust based on your setup)
-                    // Because camera is mirrored, we determine the trailing foot dynamically
+                    // Back foot determination (closest foot to the starting baseline)
                     const backFoot = leftAnkle.x < rightAnkle.x ? leftAnkle : rightAnkle;
 
-                    // Draw a visual marker marker on the tracked back foot
+                    // Draw tracking dot on back foot
                     ctx.beginPath();
                     ctx.arc(backFoot.x, backFoot.y, 8, 0, 2 * Math.PI);
                     ctx.fillStyle = "#ff3366";
                     ctx.fill();
 
-                    // Calculate Distance
-                    // 2 cones = 1 meter (100cm). Therefore: 1 cm = (coneSpacingPixels / 100)
-                    let pixelsPerCm = coneSpacingPixels / cmPerMeter;
-                    let horizontalDelta = Math.abs(backFoot.x - startBaselineX);
+                    // Calculate real world scaling based on detected cones 1 and 2
+                    // Distance between cone 0 and cone 1 = 100 cm
+                    const pixelDistanceBetweenCones = Math.abs(detectedCones[1].x - detectedCones[0].x);
+                    const pixelsPerCm = pixelDistanceBetweenCones / 100;
+
+                    // Compute total distance starting from the baseline (Cone 0 position)
+                    const horizontalDelta = Math.abs(backFoot.x - detectedCones[0].x);
                     let calculatedDistanceCm = horizontalDelta / pixelsPerCm;
 
-                    // Cap the maximum tracked measurement to 300cm as required
+                    // Clamp to max bounds (300cm)
                     let finalDistance = Math.min(calculatedDistanceCm, 300);
-
-                    // Update UI Box
                     distanceBox.innerText = `${Math.round(finalDistance)} cm`;
                 }
             }
 
-            requestAnimationFrame(trackPose);
+            requestAnimationFrame(trackFrame);
         }
 
-        // Run Application
         async function main() {
             await setupCamera();
             canvas.width = video.videoWidth;
             canvas.height = video.videoHeight;
-            await loadModel();
-            trackPose();
         }
 
         main();
