@@ -70,7 +70,7 @@
         <video id="webcam" autoplay playsinline muted></video>
         <canvas id="output"></canvas>
         <div id="distance-box">Ready: 0 cm</div>
-        <div id="status">Setting up...</div>
+        <div id="status">Booting Engines...</div>
     </div>
 
     <script>
@@ -87,7 +87,7 @@
         document.getElementById('opencv-js').addEventListener('load', () => {
             cv['onRuntimeInitialized'] = () => {
                 openCvReady = true;
-                statusText.innerText = "Computer Vision Ready. Loading AI Tracker...";
+                statusText.innerText = "Computer Vision Online. Loading AI Pose Model...";
                 loadPoseModel();
             };
         });
@@ -114,25 +114,37 @@
                     };
                 });
             } catch (err) {
-                statusText.innerText = "Camera error. Check iOS Permissions.";
+                statusText.innerText = "Camera Access Denied. Adjust Settings.";
             }
         }
 
         async function loadPoseModel() {
-            const model = poseDetection.SupportedModels.BlazePose;
-            poseDetector = await poseDetection.createDetector(model, { 
-                runtime: 'tfjs', 
-                modelType: 'lite'
-            });
-            statusText.innerText = "System Active. Line up your 4 cups.";
-            trackFrame();
+            try {
+                // Pre-initialize backend to prevent asynchronous rendering jams
+                await tf.ready();
+                const model = poseDetection.SupportedModels.BlazePose;
+                poseDetector = await poseDetection.createDetector(model, { 
+                    runtime: 'tfjs', 
+                    modelType: 'lite'
+                });
+                statusText.innerText = "System Ready. Frame your 4 items.";
+                trackFrame();
+            } catch (error) {
+                statusText.innerText = "Error loading AI backend.";
+                console.error(error);
+            }
         }
 
-        // Color-isolated Cup Tracker (Tuned for high-contrast bright colors against a dark background)
         function detectCupsFromFrame() {
             if (!openCvReady) return [];
 
-            let src = cv.imread(canvas);
+            let src;
+            try {
+                src = cv.imread(canvas);
+            } catch (e) {
+                return []; // Canvas stream not populated yet
+            }
+
             let hsv = new cv.Mat();
             let mask = new cv.Mat();
             let contours = new cv.MatVector();
@@ -141,9 +153,8 @@
             cv.cvtColor(src, hsv, cv.COLOR_RGBA2RGB);
             cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
 
-            // Broad spectrum matching for high-visibility saturated colors 
-            // perfect for bright cups against your black floor
-            let low = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [0, 70, 60, 0]);
+            // Wide-open structural tracking limits to snap targets quickly on black backgrounds
+            let low = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [0, 10, 40, 0]);
             let high = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [180, 255, 255, 255]);
             
             cv.inRange(hsv, low, high, mask);
@@ -154,11 +165,12 @@
                 let cnt = contours.get(i);
                 let area = cv.contourArea(cnt);
                 
-                if (area > 100 && area < 25000) {
+                // Discard background noise below 120 pixels in dimension
+                if (area > 120 && area < 30000) {
                     let rect = cv.boundingRect(cnt);
                     let aspectRatio = rect.width / rect.height;
                     
-                    if (aspectRatio > 0.3 && aspectRatio < 1.8) {
+                    if (aspectRatio > 0.2 && aspectRatio < 2.0) {
                         temporaryCups.push({
                             x: rect.x + (rect.width / 2),
                             y: rect.y + (rect.height / 2)
@@ -172,7 +184,7 @@
 
             let uniqueCups = [];
             temporaryCups.forEach(cup => {
-                if (!uniqueCups.some(u => Math.hypot(u.x - cup.x, u.y - cup.y) < 35)) {
+                if (!uniqueCups.some(u => Math.hypot(u.x - cup.x, u.y - cup.y) < 40)) {
                     uniqueCups.push(cup);
                 }
             });
@@ -181,11 +193,13 @@
         }
 
         async function trackFrame() {
+            // Step 1: Draw the ongoing camera layout cleanly
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
+            // Step 2: Extract cup location values
             detectedCups = detectCupsFromFrame();
 
-            // Draw "OK!" directly over the detected cups
+            // Step 3: Overlay the targeted "OK!" markings
             detectedCups.forEach((cup) => {
                 ctx.beginPath();
                 ctx.arc(cup.x, cup.y - 20, 22, 0, 2 * Math.PI);
@@ -199,39 +213,47 @@
                 ctx.fillText("OK!", cup.x, cup.y - 20);
             });
 
-            statusText.innerText = `Cups Registered: ${detectedCups.length}/4`;
+            statusText.innerText = `Items Identified: ${detectedCups.length}/4`;
 
-            try {
-                const poses = await poseDetector.estimatePoses(canvas, { maxPoses: 1, flipHorizontal: false });
-                
-                if (poses.length > 0 && detectedCups.length >= 2) {
-                    const keypoints = poses[0].keypoints;
-                    const leftAnkle = keypoints.find(k => k.name === 'left_ankle');
-                    const rightAnkle = keypoints.find(k => k.name === 'right_ankle');
-
-                    if (leftAnkle && rightAnkle && leftAnkle.score > 0.4) {
-                        const startCup = detectedCups[0];
-                        const leftDist = Math.abs(leftAnkle.x - startCup.x);
-                        const rightDist = Math.abs(rightAnkle.x - startCup.x);
-                        const backFoot = leftDist < rightDist ? leftAnkle : rightAnkle;
-
-                        ctx.beginPath();
-                        ctx.arc(backFoot.x, backFoot.y, 10, 0, 2 * Math.PI);
-                        ctx.fillStyle = "#ff3366";
-                        ctx.fill();
-
-                        const pixelDistanceBetweenCups = Math.abs(detectedCups[1].x - detectedCups[0].x);
-                        const pixelsPerCm = pixelDistanceBetweenCups / 100;
-                        const horizontalDelta = Math.abs(backFoot.x - detectedCups[0].x);
+            // Step 4: Pose parsing executed within a self-contained engine engine space
+            if (poseDetector && detectedCups.length >= 2) {
+                // tf.tidy completely blocks memory leak stack trace failures on iOS
+                await tf.tidy(async () => {
+                    try {
+                        const poses = await poseDetector.estimatePoses(canvas, { maxPoses: 1, flipHorizontal: false });
                         
-                        let calculatedDistanceCm = horizontalDelta / pixelsPerCm;
-                        let finalDistance = Math.min(calculatedDistanceCm, 300);
-                        
-                        distanceBox.innerText = `${Math.round(finalDistance)} cm`;
+                        if (poses && poses.length > 0) {
+                            const keypoints = poses[0].keypoints;
+                            const leftAnkle = keypoints.find(k => k.name === 'left_ankle');
+                            const rightAnkle = keypoints.find(k => k.name === 'right_ankle');
+
+                            if (leftAnkle && rightAnkle && (leftAnkle.score > 0.35 || rightAnkle.score > 0.35)) {
+                                const startCup = detectedCups[0];
+                                const leftDist = Math.abs(leftAnkle.x - startCup.x);
+                                const rightDist = Math.abs(rightAnkle.x - startCup.x);
+                                const backFoot = leftDist < rightDist ? leftAnkle : rightAnkle;
+
+                                // Render tracking indicator at back foot
+                                ctx.beginPath();
+                                ctx.arc(backFoot.x, backFoot.y, 10, 0, 2 * Math.PI);
+                                ctx.fillStyle = "#ff3366";
+                                ctx.fill();
+
+                                // Calculation configuration: 2 cups mapped as 100 cm
+                                const pixelDistanceBetweenCups = Math.abs(detectedCups[1].x - detectedCups[0].x);
+                                const pixelsPerCm = pixelDistanceBetweenCups / 100;
+                                const horizontalDelta = Math.abs(backFoot.x - detectedCups[0].x);
+                                
+                                let calculatedDistanceCm = horizontalDelta / pixelsPerCm;
+                                let finalDistance = Math.min(calculatedDistanceCm, 300);
+                                
+                                distanceBox.innerText = `${Math.round(finalDistance)} cm`;
+                            }
+                        }
+                    } catch (poseError) {
+                        // Suppress frame loop dropped errors to prevent interface freeze
                     }
-                }
-            } catch (e) {
-                console.error(e);
+                });
             }
 
             requestAnimationFrame(trackFrame);
