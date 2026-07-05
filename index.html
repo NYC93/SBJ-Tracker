@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Broad Jump Tracker</title>
     
     <script async src="https://docs.opencv.org/4.5.4/opencv.js" type="text/javascript" id="opencv-js"></script>
@@ -12,58 +12,58 @@
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection"></script>
 
     <style>
-        body {
+        html, body {
             margin: 0;
             padding: 0;
-            background-color: #121212;
+            width: 100%;
+            height: 100%;
+            background-color: #000;
             font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            color: white;
             overflow: hidden;
         }
 
         #container {
             position: relative;
-            width: 100vw;
-            height: 100vh;
-            max-width: 640px;
-            max-height: 480px;
-        }
-
-        video, canvas {
-            position: absolute;
-            top: 0;
-            left: 0;
             width: 100%;
             height: 100%;
-            object-fit: cover;
-            /* Removed the scaleX(-1) mirror effect so it's no longer inverted */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        /* Fixed the "weird" stretching by using object-fit: contain */
+        video, canvas {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            object-fit: contain; 
         }
 
         #distance-box {
             position: absolute;
-            top: 20px;
+            top: env(safe-area-inset-top, 20px);
             left: 20px;
-            padding: 12px 24px;
-            background: rgba(0, 0, 0, 0.85);
+            padding: 14px 28px;
+            background: rgba(18, 18, 18, 0.9);
             color: #00ffcc;
-            font-size: 24px;
-            font-weight: bold;
+            font-size: 26px;
+            font-weight: 800;
             border: 2px solid #00ffcc;
-            border-radius: 8px;
+            border-radius: 12px;
             z-index: 10;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.4);
         }
 
         #status {
             position: absolute;
-            bottom: 20px;
-            background: rgba(0,0,0,0.7);
-            padding: 8px 16px;
-            border-radius: 20px;
+            bottom: calc(env(safe-area-inset-bottom, 20px) + 10px);
+            background: rgba(18, 18, 18, 0.8);
+            padding: 10px 20px;
+            border-radius: 30px;
             font-size: 14px;
+            font-weight: 600;
             z-index: 10;
+            letter-spacing: 0.5px;
         }
     </style>
 </head>
@@ -73,7 +73,7 @@
         <video id="webcam" autoplay playsinline muted></video>
         <canvas id="output"></canvas>
         <div id="distance-box">Ready: 0 cm</div>
-        <div id="status">Initializing System...</div>
+        <div id="status">Setting up Lens...</div>
     </div>
 
     <script>
@@ -90,30 +90,50 @@
         document.getElementById('opencv-js').addEventListener('load', () => {
             cv['onRuntimeInitialized'] = () => {
                 openCvReady = true;
-                statusText.innerText = "Computer Vision Ready. Loading Pose Model...";
+                statusText.innerText = "Lens Ready. Loading Tracker...";
                 loadPoseModel();
             };
         });
 
+        // Requesting the camera with standard high-def mobile proportions
         async function setupCamera() {
-            const stream = await navigator.mediaDevices.getUserMedia({
-                video: { facingMode: "environment", width: 640, height: 480 },
+            const constraints = {
+                video: {
+                    facingMode: "environment",
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 },
+                    frameRate: { ideal: 30 }
+                },
                 audio: false
-            });
-            video.srcObject = stream;
-            return new Promise((resolve) => {
-                video.onloadedmetadata = () => { resolve(video); };
-            });
+            };
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                video.srcObject = stream;
+                return new Promise((resolve) => {
+                    video.onloadedmetadata = () => {
+                        // Dynamically adjust canvas dimensions to match the raw camera feed aspect ratio
+                        canvas.width = video.videoWidth;
+                        canvas.height = video.videoHeight;
+                        resolve(video);
+                    };
+                });
+            } catch (err) {
+                statusText.innerText = "Camera error. Check iOS Permissions.";
+                console.error(err);
+            }
         }
 
         async function loadPoseModel() {
             const model = poseDetection.SupportedModels.BlazePose;
-            poseDetector = await poseDetection.createDetector(model, { runtime: 'tfjs', modelType: 'heavy' });
-            statusText.innerText = "System Active. Scan your 4 cones.";
+            poseDetector = await poseDetection.createDetector(model, { 
+                runtime: 'tfjs', 
+                modelType: 'lite' // Switched to 'lite' model to maximize FPS on mobile browsers
+            });
+            statusText.innerText = "System Active. Frame your 4 cones.";
             trackFrame();
         }
 
-        // Optimized cone tracking logic
         function detectConesFromFrame() {
             if (!openCvReady) return [];
 
@@ -122,29 +142,23 @@
             let contours = new cv.MatVector();
             let hierarchy = new cv.Mat();
 
-            // Gray processing with alternative thresholds to catch any color cone
             cv.cvtColor(src, dst, cv.COLOR_RGBA2GRAY);
-            cv.threshold(dst, dst, 80, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
-            
+            cv.threshold(dst, dst, 75, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
             cv.findContours(dst, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
             let temporaryCones = [];
-
             for (let i = 0; i < contours.size(); ++i) {
                 let cnt = contours.get(i);
                 let area = cv.contourArea(cnt);
                 
-                // Filter based on physical size on camera to ignore tiny background specs
-                if (area > 150 && area < 15000) {
+                if (area > 100 && area < 20000) {
                     let rect = cv.boundingRect(cnt);
                     let aspectRatio = rect.width / rect.height;
                     
-                    // Cones are taller or uniform, filtering horizontal noise lines
-                    if (aspectRatio > 0.3 && aspectRatio < 1.8) {
+                    if (aspectRatio > 0.3 && aspectRatio < 1.7) {
                         temporaryCones.push({
                             x: rect.x + (rect.width / 2),
-                            y: rect.y + (rect.height / 2),
-                            area: area
+                            y: rect.y + (rect.height / 2)
                         });
                     }
                 }
@@ -153,70 +167,69 @@
 
             src.delete(); dst.delete(); contours.delete(); hierarchy.delete();
 
-            // Prevent overlapping markers on the same cone by checking proximity
             let uniqueCones = [];
             temporaryCones.forEach(cone => {
-                if (!uniqueCones.some(u => Math.hypot(u.x - cone.x, u.y - cone.y) < 35)) {
+                if (!uniqueCones.some(u => Math.hypot(u.x - cone.x, u.y - cone.y) < 40)) {
                     uniqueCones.push(cone);
                 }
             });
 
-            // Sort left-to-right based on reality layout and limit to 4
             return uniqueCones.sort((a, b) => a.x - b.x).slice(0, 4);
         }
 
         async function trackFrame() {
-            // Draw un-inverted video stream frame
+            // Draw frame unwarped
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
             detectedCones = detectConesFromFrame();
 
-            // Render the "OK!" label precisely above each tracked cone point
+            // Render crisp, steady OK circles
             detectedCones.forEach((cone) => {
                 ctx.beginPath();
-                ctx.arc(cone.x, cone.y - 20, 20, 0, 2 * Math.PI);
+                ctx.arc(cone.x, cone.y - 25, 24, 0, 2 * Math.PI);
                 ctx.fillStyle = "#00ffcc";
                 ctx.fill();
 
                 ctx.fillStyle = "#121212";
-                ctx.font = "bold 12px sans-serif";
+                ctx.font = "bold 14px -apple-system, sans-serif";
                 ctx.textAlign = "center";
                 ctx.textBaseline = "middle";
-                ctx.fillText("OK!", cone.x, cone.y - 20);
+                ctx.fillText("OK!", cone.x, cone.y - 25);
             });
 
-            statusText.innerText = `Cones Logged: ${detectedCones.length}/4`;
+            statusText.innerText = `Cones Set: ${detectedCones.length}/4`;
 
-            // Body landmark tracking
-            const poses = await poseDetector.estimatePoses(video);
-            if (poses.length > 0 && detectedCones.length >= 2) {
-                const keypoints = poses[0].keypoints;
-                const leftAnkle = keypoints.find(k => k.name === 'left_ankle');
-                const rightAnkle = keypoints.find(k => k.name === 'right_ankle');
+            try {
+                const poses = await poseDetector.estimatePoses(canvas, { maxPoses: 1, flipHorizontal: false });
+                
+                if (poses.length > 0 && detectedCones.length >= 2) {
+                    const keypoints = poses[0].keypoints;
+                    const leftAnkle = keypoints.find(k => k.name === 'left_ankle');
+                    const rightAnkle = keypoints.find(k => k.name === 'right_ankle');
 
-                if (leftAnkle && rightAnkle && leftAnkle.score > 0.5 && rightAnkle.score > 0.5) {
-                    // With fixed inversion, the trailing back foot depends on the direction jumped.
-                    // We check which foot is closer to the starting Cone 0 coordinate.
-                    const startCone = detectedCones[0];
-                    const leftDist = Math.abs(leftAnkle.x - startCone.x);
-                    const rightDist = Math.abs(rightAnkle.x - startCone.x);
-                    const backFoot = leftDist < rightDist ? leftAnkle : rightAnkle;
+                    if (leftAnkle && rightAnkle && leftAnkle.score > 0.4) {
+                        const startCone = detectedCones[0];
+                        const leftDist = Math.abs(leftAnkle.x - startCone.x);
+                        const rightDist = Math.abs(rightAnkle.x - startCone.x);
+                        const backFoot = leftDist < rightDist ? leftAnkle : rightAnkle;
 
-                    ctx.beginPath();
-                    ctx.arc(backFoot.x, backFoot.y, 8, 0, 2 * Math.PI);
-                    ctx.fillStyle = "#ff3366";
-                    ctx.fill();
+                        ctx.beginPath();
+                        ctx.arc(backFoot.x, backFoot.y, 10, 0, 2 * Math.PI);
+                        ctx.fillStyle = "#ff3366";
+                        ctx.fill();
 
-                    // Calculate mapping using the distance between Cone 1 and Cone 0 (1 meter / 100cm)
-                    const pixelDistanceBetweenCones = Math.abs(detectedCones[1].x - detectedCones[0].x);
-                    const pixelsPerCm = pixelDistanceBetweenCones / 100;
-
-                    const horizontalDelta = Math.abs(backFoot.x - detectedCones[0].x);
-                    let calculatedDistanceCm = horizontalDelta / pixelsPerCm;
-
-                    let finalDistance = Math.min(calculatedDistanceCm, 300);
-                    distanceBox.innerText = `${Math.round(finalDistance)} cm`;
+                        const pixelDistanceBetweenCones = Math.abs(detectedCones[1].x - detectedCones[0].x);
+                        const pixelsPerCm = pixelDistanceBetweenCones / 100;
+                        const horizontalDelta = Math.abs(backFoot.x - detectedCones[0].x);
+                        
+                        let calculatedDistanceCm = horizontalDelta / pixelsPerCm;
+                        let finalDistance = Math.min(calculatedDistanceCm, 300);
+                        
+                        distanceBox.innerText = `${Math.round(finalDistance)} cm`;
+                    }
                 }
+            } catch (e) {
+                console.error("Tracking frame skipped to preserve camera fluidity.");
             }
 
             requestAnimationFrame(trackFrame);
@@ -224,8 +237,6 @@
 
         async function main() {
             await setupCamera();
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
         }
 
         main();
